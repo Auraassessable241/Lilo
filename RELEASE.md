@@ -2,16 +2,19 @@
 
 ## Install on Windows
 
-1. Download `Lilo-<version>-windows-x64.zip` from the GitHub release.
-2. Optionally verify the archive against the accompanying `.sha256` file.
-3. Extract the complete archive to a directory owned by your Windows account.
-4. Run `Lilo.exe`. Windows SmartScreen may warn because the preview binary is not code-signed.
+The preferred installation method is WinGet:
+
+```powershell
+winget install --id HellterEnjoy.Lilo --exact
+```
+
+Until the initial package is accepted by the WinGet community repository, or for a manual installation, download `Lilo-<version>-windows-x64-setup.exe` from the GitHub release and run it. The installer is per-user and does not require administrator access. The ZIP archive remains available as a portable build. Windows SmartScreen may warn because the preview binary is not code-signed.
 
 Lilo creates its default vault as `LiloVault` in the user's Documents directory. The active path is visible and can be changed immediately in **Settings → Storage**.
 
 ## Update
 
-Close Lilo, extract the new archive, and replace the old application files. The executable is separate from the vault, so replacing it does not remove notes or settings. Keep a vault export before an update when the data matters.
+Update a WinGet installation with `winget upgrade --id HellterEnjoy.Lilo --exact`, or run the newer Setup.exe over the existing installation. Portable users can still replace the files from the newer ZIP. The executable is separate from the vault, so updating or uninstalling the application does not remove notes or settings. Keep a vault export before an update when the data matters.
 
 ## Backup and recovery
 
@@ -33,4 +36,16 @@ cargo clippy --all-targets -- -D warnings
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```
 
-The script performs a locked release build and creates the ZIP plus its SHA-256 checksum under `dist/`. Release artifacts are intentionally ignored by Git.
+The script performs a locked release build and creates the Inno Setup installer, portable ZIP, and their SHA-256 checksums under `dist/`. Release artifacts are intentionally ignored by Git.
+
+## Publishing releases and WinGet updates
+
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies that the tag matches `Cargo.toml`, runs the tests, builds all Windows artifacts, and creates or updates the GitHub release.
+
+The first WinGet version must be submitted once from the checked-in manifests:
+
+```powershell
+wingetcreate submit .\winget\0.1.0 --token $env:WINGET_GITHUB_TOKEN --no-open
+```
+
+After that PR has been accepted, add a repository Actions secret named `WINGET_GITHUB_TOKEN`. It should contain a GitHub token authorized to fork and open pull requests against `microsoft/winget-pkgs`. Every later version tag will run `wingetcreate update HellterEnjoy.Lilo` automatically after the installer is uploaded. The `Retry WinGet submission` workflow can retry a failed update without rebuilding or replacing the release.
