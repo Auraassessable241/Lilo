@@ -3,6 +3,7 @@ mod graph;
 mod links;
 mod markdown;
 mod storage;
+mod ui_style;
 
 use eframe::egui;
 use links::{LinkIndex, LinkResolution};
@@ -10,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use storage::{AppData, AppSettings, Note, NoteSort, StoragePaths, ThemeChoice};
+use ui_style::Icon;
 use uuid::Uuid;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -43,6 +45,15 @@ struct WidgetApp {
     last_external_sync: Instant,
     external_conflict: bool,
     window_settings_applied: bool,
+    recovery_tab: RecoveryTab,
+    selected_backup: Option<PathBuf>,
+    backup_preview: String,
+    diagnostics: Vec<String>,
+    import_path_buffer: String,
+    export_path_buffer: String,
+    external_changed_paths: Vec<PathBuf>,
+    new_tag: String,
+    new_alias: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -52,6 +63,14 @@ enum AppView {
     Graph,
     Trash,
     Settings,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RecoveryTab {
+    #[default]
+    Trash,
+    Backups,
+    Diagnostics,
 }
 
 fn show_note_dates(ui: &mut egui::Ui, note: &Note) {
@@ -118,7 +137,7 @@ fn show_note_row(
 
     ui.horizontal(|ui| {
         if note.pinned {
-            ui.label("*").on_hover_text("Pinned");
+            ui.label("◆").on_hover_text("Pinned");
         }
         let response = ui
             .selectable_label(selected_note_id == Some(note.id), display_title)
@@ -307,6 +326,7 @@ impl WidgetApp {
         let vault_path_buffer = loaded.settings.vault_path.display().to_string();
         let graph_state = graph::GraphState::restore(&loaded.settings.graph_node_offsets);
         let vault_snapshot = storage::vault_snapshot(&loaded.paths.notes_dir).unwrap_or_default();
+        let diagnostics = loaded.warnings.clone();
         #[cfg(target_os = "windows")]
         let _ = set_autostart(loaded.settings.autostart);
         Self {
@@ -336,6 +356,15 @@ impl WidgetApp {
             last_external_sync: Instant::now(),
             external_conflict: false,
             window_settings_applied: false,
+            recovery_tab: RecoveryTab::Trash,
+            selected_backup: None,
+            backup_preview: String::new(),
+            diagnostics,
+            import_path_buffer: String::new(),
+            export_path_buffer: String::new(),
+            external_changed_paths: Vec::new(),
+            new_tag: String::new(),
+            new_alias: String::new(),
         }
     }
 
@@ -594,6 +623,8 @@ impl WidgetApp {
                     .cloned()
                     .or_else(|| Some(reason.to_owned()));
                 self.external_conflict = false;
+                self.external_changed_paths.clear();
+                self.diagnostics = warnings;
                 self.save_settings();
             }
             Err(error) => self.storage_message = Some(format!("Failed to reload vault: {error}")),
@@ -608,6 +639,13 @@ impl WidgetApp {
         self.last_external_sync = Instant::now();
         let current = storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
         if current != self.vault_snapshot {
+            self.external_changed_paths = current
+                .symmetric_difference(&self.vault_snapshot)
+                .map(|(path, _)| path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            self.external_changed_paths.sort();
             if self.dirty_note_ids.is_empty() {
                 self.reload_vault("Reloaded changes from disk");
             } else {
@@ -622,9 +660,26 @@ impl WidgetApp {
     }
 
     fn show_trash(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Trash");
-        ui.small("Deleted notes can be restored to their original folder.");
+        ui_style::section_header(ui, "Recovery", "Trash, backups and vault diagnostics");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.recovery_tab, RecoveryTab::Trash, "Trash");
+            ui.selectable_value(&mut self.recovery_tab, RecoveryTab::Backups, "Backups");
+            ui.selectable_value(
+                &mut self.recovery_tab,
+                RecoveryTab::Diagnostics,
+                "Diagnostics",
+            );
+        });
         ui.separator();
+        match self.recovery_tab {
+            RecoveryTab::Trash => self.show_trash_tab(ui),
+            RecoveryTab::Backups => self.show_backups_tab(ui),
+            RecoveryTab::Diagnostics => self.show_diagnostics_tab(ui),
+        }
+    }
+
+    fn show_trash_tab(&mut self, ui: &mut egui::Ui) {
+        ui.small("Deleted notes retain their original folder and can be restored safely.");
         match storage::list_trash(&self.storage_paths) {
             Ok(entries) if entries.is_empty() => {
                 ui.add_space(20.0);
@@ -636,7 +691,7 @@ impl WidgetApp {
                     for entry in entries {
                         ui.horizontal(|ui| {
                             ui.label(&entry.display_name);
-                            if ui.small_button("Restore").clicked() {
+                            if ui_style::compact_action(ui, Icon::Restore, "Restore").clicked() {
                                 restore = Some(entry.relative_path.clone());
                             }
                         });
@@ -657,10 +712,198 @@ impl WidgetApp {
         }
     }
 
+    fn show_backups_tab(&mut self, ui: &mut egui::Ui) {
+        ui.small("Lilo creates rotating snapshots before overwriting note files.");
+        let mut restore = None;
+        match storage::list_backups(&self.storage_paths) {
+            Ok(entries) if entries.is_empty() => {
+                ui.add_space(20.0);
+                ui.label("No backups yet");
+            }
+            Ok(entries) => {
+                let list_height = (ui.available_height() * 0.48).max(90.0);
+                egui::ScrollArea::vertical()
+                    .max_height(list_height)
+                    .show(ui, |ui| {
+                        for entry in entries {
+                            let selected = self.selected_backup.as_ref()
+                                == Some(&entry.relative_path);
+                            let response = ui.selectable_label(
+                                selected,
+                                format!(
+                                    "{}  ·  {}  ·  {} B",
+                                    entry.title, entry.created_label, entry.size
+                                ),
+                            );
+                            if response.clicked() {
+                                self.selected_backup = Some(entry.relative_path.clone());
+                                self.backup_preview = storage::backup_preview(
+                                    &self.storage_paths,
+                                    &entry.relative_path,
+                                )
+                                .unwrap_or_else(|error| format!("Preview failed: {error}"));
+                            }
+                            if selected
+                                && ui_style::compact_action(
+                                    ui,
+                                    Icon::Restore,
+                                    "Restore this version",
+                                )
+                                .clicked()
+                            {
+                                restore = Some((entry.note_id, entry.relative_path));
+                            }
+                        }
+                    });
+                if !self.backup_preview.is_empty() {
+                    ui.separator();
+                    ui.small("Backup preview");
+                    egui::ScrollArea::vertical()
+                        .max_height((ui.available_height() - 32.0).max(80.0))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.backup_preview)
+                                    .interactive(false)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                }
+            }
+            Err(error) => {
+                ui.colored_label(ui.visuals().error_fg_color, format!("Backup error: {error}"));
+            }
+        }
+
+        if let Some((note_id, relative)) = restore {
+            let result = self
+                .data
+                .notes
+                .iter_mut()
+                .find(|note| note.id == note_id)
+                .ok_or_else(|| "The original note is not present in this vault".to_owned())
+                .and_then(|note| {
+                    storage::restore_backup(
+                        note,
+                        &self.storage_paths,
+                        &relative,
+                        self.settings.backup_limit,
+                    )
+                    .map_err(|error| error.to_string())
+                });
+            match result {
+                Ok(()) => {
+                    self.data.selected_note_id = Some(note_id);
+                    self.link_index =
+                        LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                    self.vault_snapshot =
+                        storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
+                    self.storage_message = Some("Backup restored; the previous version was preserved".to_owned());
+                }
+                Err(error) => self.storage_message = Some(format!("Restore failed: {error}")),
+            }
+        }
+    }
+
+    fn show_diagnostics_tab(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Scan vault now").clicked() {
+            self.diagnostics = storage::vault_diagnostics(&self.storage_paths)
+                .unwrap_or_else(|error| vec![format!("Diagnostics failed: {error}")]);
+        }
+        if self.diagnostics.is_empty() {
+            ui.add_space(20.0);
+            ui.colored_label(ui.visuals().hyperlink_color, "No vault problems detected");
+        } else {
+            ui.small("Files are never rewritten merely by running diagnostics.");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for diagnostic in &self.diagnostics {
+                    ui.colored_label(ui.visuals().warn_fg_color, diagnostic);
+                    ui.add_space(4.0);
+                }
+            });
+        }
+    }
+
+    fn switch_vault_from_buffer(&mut self) {
+        self.flush_dirty_notes();
+        let previous_path = self.settings.vault_path.clone();
+        if let Err(error) = storage::set_vault_path(&mut self.settings, &self.vault_path_buffer) {
+            self.storage_message = Some(format!("Invalid vault path: {error}"));
+            return;
+        }
+        if let Err(error) = storage::save_settings(&self.storage_paths.settings_path, &self.settings)
+        {
+            self.settings.vault_path = previous_path;
+            self.storage_message = Some(format!("Failed to save vault path: {error}"));
+            return;
+        }
+        match storage::load_storage() {
+            Ok(loaded) => {
+                self.data = loaded.data;
+                self.settings = loaded.settings;
+                self.storage_paths = loaded.paths;
+                self.folder_paths = loaded.folder_paths;
+                self.diagnostics = loaded.warnings;
+                self.link_index =
+                    LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                self.graph_state =
+                    graph::GraphState::restore(&self.settings.graph_node_offsets);
+                self.vault_snapshot =
+                    storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
+                self.vault_path_buffer = self.settings.vault_path.display().to_string();
+                self.dirty_note_ids.clear();
+                self.pending_title_rename_ids.clear();
+                self.external_conflict = false;
+                self.external_changed_paths.clear();
+                self.storage_message = Some("Vault switched successfully".to_owned());
+                self.view = AppView::NotesList;
+            }
+            Err(error) => {
+                self.settings.vault_path = previous_path;
+                let _ = storage::save_settings(&self.storage_paths.settings_path, &self.settings);
+                self.storage_message = Some(format!("Could not switch vault: {error}"));
+            }
+        }
+    }
+
+    fn import_markdown_from_buffer(&mut self) {
+        let source = PathBuf::from(self.import_path_buffer.trim());
+        match storage::import_markdown(
+            &source,
+            &self.storage_paths,
+            &self.settings.selected_folder,
+        ) {
+            Ok(note) => {
+                let id = note.id;
+                self.data.notes.push(note);
+                self.data.selected_note_id = Some(id);
+                self.link_index =
+                    LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                self.vault_snapshot =
+                    storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
+                self.import_path_buffer.clear();
+                self.storage_message = Some("Markdown note imported".to_owned());
+                self.view = AppView::Editor;
+                self.save_settings();
+            }
+            Err(error) => self.storage_message = Some(format!("Import failed: {error}")),
+        }
+    }
+
+    fn export_vault_from_buffer(&mut self) {
+        self.flush_dirty_notes();
+        let destination = PathBuf::from(self.export_path_buffer.trim());
+        match storage::export_vault(&self.storage_paths, &destination) {
+            Ok(path) => {
+                self.storage_message = Some(format!("Vault exported to {}", path.display()))
+            }
+            Err(error) => self.storage_message = Some(format!("Export failed: {error}")),
+        }
+    }
+
     fn show_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Settings");
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.label("Appearance");
+            ui_style::section_header(ui, "Appearance", "Applied immediately");
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.settings.theme, ThemeChoice::Dark, "Dark");
                 ui.selectable_value(&mut self.settings.theme, ThemeChoice::Light, "Light");
@@ -696,19 +939,18 @@ impl WidgetApp {
             }
 
             ui.separator();
-            ui.label("Storage");
+            ui_style::section_header(ui, "Storage", "Markdown remains portable");
             ui.text_edit_singleline(&mut self.vault_path_buffer);
-            if ui.button("Use this vault after restart").clicked() {
-                match storage::set_vault_path(&mut self.settings, &self.vault_path_buffer) {
-                    Ok(()) => {
-                        self.storage_message =
-                            Some("Vault path saved. Restart Lilo to switch vaults.".to_owned())
-                    }
-                    Err(error) => {
-                        self.storage_message = Some(format!("Invalid vault path: {error}"))
-                    }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Switch vault now").clicked() {
+                    self.switch_vault_from_buffer();
                 }
-            }
+                if ui.button("Open vault folder").clicked()
+                    && let Err(error) = open_folder(&self.settings.vault_path)
+                {
+                    self.storage_message = Some(format!("Could not open vault: {error}"));
+                }
+            });
             ui.checkbox(
                 &mut self.settings.backups_enabled,
                 "Create backups before overwriting notes",
@@ -718,8 +960,33 @@ impl WidgetApp {
                     .text("Backups per note"),
             );
 
+            ui.add_space(8.0);
+            ui.label("Import one Markdown file into the selected folder");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.import_path_buffer)
+                        .hint_text("C:\\path\\note.md")
+                        .desired_width((ui.available_width() - 72.0).max(80.0)),
+                );
+                if ui.button("Import").clicked() {
+                    self.import_markdown_from_buffer();
+                }
+            });
+
+            ui.label("Export Notes, Trash and settings to a new timestamped folder");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.export_path_buffer)
+                        .hint_text("C:\\Exports")
+                        .desired_width((ui.available_width() - 72.0).max(80.0)),
+                );
+                if ui.button("Export").clicked() {
+                    self.export_vault_from_buffer();
+                }
+            });
+
             ui.separator();
-            ui.label("Shortcuts (Ctrl/Shift/Alt + A-Z)");
+            ui_style::section_header(ui, "Shortcuts", "Ctrl/Shift/Alt + A-Z");
             shortcut_field(ui, "New note", &mut self.settings.shortcuts.new_note);
             shortcut_field(ui, "Search", &mut self.settings.shortcuts.search);
             shortcut_field(ui, "Graph", &mut self.settings.shortcuts.graph);
@@ -734,9 +1001,6 @@ impl WidgetApp {
                 self.save_settings();
                 self.storage_message = Some("Settings saved".to_owned());
             }
-            if let Some(message) = &self.storage_message {
-                ui.small(message);
-            }
         });
     }
 
@@ -748,11 +1012,11 @@ impl WidgetApp {
         ui.horizontal(|ui| {
             ui.heading("Notes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("+ Folder").clicked() {
+                if ui_style::compact_action(ui, Icon::Folder, "New folder").clicked() {
                     self.show_new_folder_input = !self.show_new_folder_input;
                     self.new_folder_name.clear();
                 }
-                if ui.small_button("+ Note").clicked() {
+                if ui_style::compact_action(ui, Icon::Add, "New note").clicked() {
                     create_note_clicked = true;
                 }
             });
@@ -965,9 +1229,6 @@ impl WidgetApp {
             self.open_note(id);
         }
 
-        if let Some(message) = &self.storage_message {
-            ui.small(message);
-        }
     }
 
     fn open_note(&mut self, id: Uuid) {
@@ -1173,51 +1434,66 @@ impl eframe::App for WidgetApp {
             .to_owned();
 
         egui::Panel::top("title_bar")
-            .exact_size(36.0)
+            .exact_size(ui_style::TOP_BAR_HEIGHT)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.view == AppView::Editor, "E")
-                        .on_hover_text("Editor (Escape)")
-                        .clicked()
+                    if ui_style::icon_button(
+                        ui,
+                        Icon::Editor,
+                        self.view == AppView::Editor,
+                        "Editor (Escape)",
+                    )
+                    .clicked()
                     {
                         self.view = AppView::Editor;
                         self.focus_search = false;
                         self.focus_editor = true;
                         self.pending_delete_id = None;
                     }
-                    if ui
-                        .selectable_label(self.view == AppView::NotesList, "L")
-                        .on_hover_text("Notes list (Ctrl+P or Ctrl+F)")
-                        .clicked()
+                    if ui_style::icon_button(
+                        ui,
+                        Icon::Notes,
+                        self.view == AppView::NotesList,
+                        "Notes (Ctrl+P)",
+                    )
+                    .clicked()
                     {
                         self.view = AppView::NotesList;
                         self.focus_search = true;
                         self.focus_editor = false;
                         self.pending_delete_id = None;
                     }
-                    if ui
-                        .selectable_label(self.view == AppView::Graph, "G")
-                        .on_hover_text("Graph (Ctrl+G)")
-                        .clicked()
+                    if ui_style::icon_button(
+                        ui,
+                        Icon::Graph,
+                        self.view == AppView::Graph,
+                        "Knowledge graph (Ctrl+G)",
+                    )
+                    .clicked()
                     {
                         self.view = AppView::Graph;
                         self.focus_search = false;
                         self.focus_editor = false;
                         self.pending_delete_id = None;
                     }
-                    if ui
-                        .selectable_label(self.view == AppView::Trash, "T")
-                        .on_hover_text("Trash")
-                        .clicked()
+                    if ui_style::icon_button(
+                        ui,
+                        Icon::Trash,
+                        self.view == AppView::Trash,
+                        "Trash and recovery",
+                    )
+                    .clicked()
                     {
                         self.view = AppView::Trash;
                         self.pending_delete_id = None;
                     }
-                    if ui
-                        .selectable_label(self.view == AppView::Settings, "S")
-                        .on_hover_text("Settings")
-                        .clicked()
+                    if ui_style::icon_button(
+                        ui,
+                        Icon::Settings,
+                        self.view == AppView::Settings,
+                        "Settings (Ctrl+,)",
+                    )
+                    .clicked()
                     {
                         self.view = AppView::Settings;
                         self.pending_delete_id = None;
@@ -1240,7 +1516,7 @@ impl eframe::App for WidgetApp {
                     if drag_area.drag_started() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
-                    if ui.button("X").on_hover_text("Close").clicked() {
+                    if ui_style::icon_button(ui, Icon::Close, false, "Close Lilo").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
@@ -1248,21 +1524,44 @@ impl eframe::App for WidgetApp {
 
         if self.external_conflict {
             egui::Panel::top("external_conflict")
-                .exact_size(34.0)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Note files changed outside Lilo.");
-                        if ui.small_button("Reload disk version").clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        let changed = self
+                            .external_changed_paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "External changes conflict with local edits",
+                        )
+                        .on_hover_text(changed);
+                        if ui.button("Reload disk").clicked() {
                             self.dirty_note_ids.clear();
                             self.pending_title_rename_ids.clear();
                             self.reload_vault("Reloaded disk version");
                         }
-                        if ui.small_button("Keep my version").clicked() {
+                        if ui.button("Keep mine").clicked() {
                             self.external_conflict = false;
                             self.flush_dirty_notes();
                         }
                     });
                 });
+        }
+
+        if let Some(message) = self.storage_message.clone() {
+            let is_error = ["failed", "cannot", "could not", "invalid", "conflict"]
+                .iter()
+                .any(|word| message.to_lowercase().contains(word));
+            egui::Panel::bottom("status_message").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(ui_style::status_color(ui.visuals(), is_error), message);
+                    if ui_style::icon_button(ui, Icon::Close, false, "Dismiss message").clicked() {
+                        self.storage_message = None;
+                    }
+                });
+            });
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -1285,6 +1584,97 @@ impl eframe::App for WidgetApp {
 
                         // UUID preserves cursor and undo state between frames.
                         let editor_id = ui.make_persistent_id(("markdown_editor", note.id));
+                        let mut markdown_command = None;
+                        ui.horizontal_wrapped(|ui| {
+                            for (icon, label, command) in [
+                                (Icon::Bold, "Bold (Ctrl+B)", markdown::MarkdownCommand::Bold),
+                                (
+                                    Icon::Italic,
+                                    "Italic (Ctrl+I)",
+                                    markdown::MarkdownCommand::Italic,
+                                ),
+                                (
+                                    Icon::Heading,
+                                    "Toggle heading",
+                                    markdown::MarkdownCommand::Heading,
+                                ),
+                                (
+                                    Icon::Task,
+                                    "Toggle task",
+                                    markdown::MarkdownCommand::Task,
+                                ),
+                                (
+                                    Icon::Code,
+                                    "Inline code",
+                                    markdown::MarkdownCommand::InlineCode,
+                                ),
+                                (
+                                    Icon::Link,
+                                    "Wiki link (Ctrl+K)",
+                                    markdown::MarkdownCommand::WikiLink,
+                                ),
+                            ] {
+                                if ui_style::icon_button(ui, icon, false, label).clicked() {
+                                    markdown_command = Some(command);
+                                }
+                            }
+                            ui.menu_button("⋯", |ui| {
+                                for (label, command) in [
+                                    ("Bullet list", markdown::MarkdownCommand::Bullet),
+                                    ("Code block", markdown::MarkdownCommand::CodeBlock),
+                                    ("Indent lines", markdown::MarkdownCommand::Indent),
+                                    ("Outdent lines", markdown::MarkdownCommand::Outdent),
+                                ] {
+                                    if ui.button(label).clicked() {
+                                        markdown_command = Some(command);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        });
+
+                        let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
+                        if editor_focused {
+                            if ui.input(|input| {
+                                input.modifiers.command && input.key_pressed(egui::Key::B)
+                            }) {
+                                markdown_command = Some(markdown::MarkdownCommand::Bold);
+                            } else if ui.input(|input| {
+                                input.modifiers.command && input.key_pressed(egui::Key::I)
+                            }) {
+                                markdown_command = Some(markdown::MarkdownCommand::Italic);
+                            } else if ui.input(|input| {
+                                input.modifiers.command && input.key_pressed(egui::Key::K)
+                            }) {
+                                markdown_command = Some(markdown::MarkdownCommand::WikiLink);
+                            }
+                        }
+
+                        let mut command_changed = markdown_command.is_some_and(|command| {
+                            markdown::apply_command(
+                                ui.ctx(),
+                                editor_id,
+                                &mut note.content,
+                                command,
+                            )
+                        });
+                        if editor_focused
+                            && ui.input(|input| {
+                                input.modifiers.is_none()
+                                    && input.key_pressed(egui::Key::Enter)
+                            })
+                            && markdown::continue_list_at_cursor(
+                                ui.ctx(),
+                                editor_id,
+                                &mut note.content,
+                            )
+                        {
+                            ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                            });
+                            command_changed = true;
+                        }
+
                         let editor_output = markdown::show_editor(
                             ui,
                             &mut note.content,
@@ -1331,7 +1721,8 @@ impl eframe::App for WidgetApp {
                         }
 
                         note_name_changed = title_response.changed();
-                        note_content_changed = content_response.changed() || checkbox_toggled;
+                        note_content_changed =
+                            content_response.changed() || checkbox_toggled || command_changed;
                         if note_name_changed || note_content_changed {
                             note.mark_as_updated();
                             changed_note_id = Some(note.id);
@@ -1395,9 +1786,6 @@ impl eframe::App for WidgetApp {
                         }
                     }
 
-                    if let Some(message) = &self.storage_message {
-                        ui.small(message);
-                    }
                 }
                 AppView::NotesList => self.show_notes_list(ui),
                 AppView::Graph => {
@@ -1452,6 +1840,25 @@ impl eframe::App for WidgetApp {
         self.flush_dirty_notes();
     }
 }
+
+fn open_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(path).spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn set_autostart(enabled: bool) -> std::io::Result<()> {
     use std::process::Command;

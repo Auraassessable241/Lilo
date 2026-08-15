@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 3;
+const SETTINGS_VERSION: u32 = 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSort {
@@ -275,10 +275,14 @@ pub struct LoadedStorage {
 }
 
 pub fn load_storage() -> StorageResult<LoadedStorage> {
-    let project_dirs = ProjectDirs::from("com", "Clown", "RustWidgets")
+    let project_dirs = ProjectDirs::from("com", "HellterEnjoy", "Lilo")
         .ok_or_else(|| io::Error::other("Failed to resolve application directories"))?;
     let config_dir = project_dirs.config_dir().to_path_buf();
     fs::create_dir_all(&config_dir)?;
+
+    if let Some(legacy_dirs) = ProjectDirs::from("com", "Clown", "RustWidgets") {
+        copy_legacy_config(legacy_dirs.config_dir(), &config_dir)?;
+    }
 
     let settings_path = config_dir.join("settings.json");
     let default_vault_path = default_vault_path(&config_dir);
@@ -569,6 +573,15 @@ pub struct TrashEntry {
     pub display_name: String,
 }
 
+#[derive(Clone)]
+pub struct BackupEntry {
+    pub relative_path: PathBuf,
+    pub note_id: Uuid,
+    pub title: String,
+    pub created_label: String,
+    pub size: u64,
+}
+
 pub fn list_trash(paths: &StoragePaths) -> StorageResult<Vec<TrashEntry>> {
     let mut entries = Vec::new();
     let mut directories = vec![paths.trash_dir.clone()];
@@ -608,6 +621,68 @@ pub fn list_trash(paths: &StoragePaths) -> StorageResult<Vec<TrashEntry>> {
     }
     entries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
     Ok(entries)
+}
+
+pub fn list_backups(paths: &StoragePaths) -> StorageResult<Vec<BackupEntry>> {
+    fs::create_dir_all(&paths.backups_dir)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&paths.backups_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        {
+            continue;
+        }
+        let Ok(note) = load_note(&path) else {
+            continue;
+        };
+        let metadata = entry.metadata()?;
+        let modified = metadata.modified().unwrap_or(SystemTime::now());
+        let created_label = DateTime::<Local>::from(modified)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        entries.push(BackupEntry {
+            relative_path: path.strip_prefix(&paths.backups_dir)?.to_path_buf(),
+            note_id: note.id,
+            title: display_note_title(&note).to_owned(),
+            created_label,
+            size: metadata.len(),
+        });
+    }
+    entries.sort_by(|left, right| right.created_label.cmp(&left.created_label));
+    Ok(entries)
+}
+
+pub fn backup_preview(paths: &StoragePaths, relative: &Path) -> StorageResult<String> {
+    let path = safe_managed_file(&paths.backups_dir, relative)?;
+    Ok(load_note(&path)?.content)
+}
+
+pub fn restore_backup(
+    note: &mut Note,
+    paths: &StoragePaths,
+    relative: &Path,
+    backup_limit: usize,
+) -> StorageResult<()> {
+    let backup_path = safe_managed_file(&paths.backups_dir, relative)?;
+    let mut restored = load_note(&backup_path)?;
+    if restored.id != note.id {
+        return Err(io::Error::other("Backup belongs to a different note").into());
+    }
+    save_note_with_backup(note, &paths.backups_dir, backup_limit.max(1))?;
+    restored.file_path = note.file_path.clone();
+    restored.updated_at = Local::now();
+    restored.refresh_search_text();
+    save_note(&restored)?;
+    *note = restored;
+    Ok(())
 }
 
 pub fn restore_from_trash(paths: &StoragePaths, relative: &Path) -> StorageResult<PathBuf> {
@@ -692,6 +767,118 @@ pub fn set_vault_path(settings: &mut AppSettings, value: &str) -> StorageResult<
     Ok(())
 }
 
+pub fn import_markdown(
+    source: &Path,
+    paths: &StoragePaths,
+    target_relative: &Path,
+) -> StorageResult<Note> {
+    if !source.is_file()
+        || !source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    {
+        return Err(io::Error::other("Import source must be a Markdown file").into());
+    }
+    if source.starts_with(&paths.notes_dir) {
+        return Err(io::Error::other("The selected file is already inside this vault").into());
+    }
+
+    let destination_dir = ensure_note_folder(&paths.notes_dir, target_relative)?;
+    let title = source
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut note = match load_note(source) {
+        Ok(mut note) => {
+            note.id = Uuid::new_v4();
+            note.created_at = Local::now();
+            note.updated_at = note.created_at;
+            note
+        }
+        Err(_) => {
+            let mut note = Note::new_named(&destination_dir, &title);
+            note.content = fs::read_to_string(source)?.replace("\r\n", "\n");
+            note
+        }
+    };
+    if note.title.trim().is_empty() {
+        note.title = title;
+    }
+    note.file_path = destination_dir.join(note_file_name(&note.title, note.id));
+    note.refresh_search_text();
+    save_note(&note)?;
+    Ok(note)
+}
+
+pub fn export_vault(paths: &StoragePaths, destination_root: &Path) -> StorageResult<PathBuf> {
+    if destination_root.as_os_str().is_empty() {
+        return Err(io::Error::other("Export destination cannot be empty").into());
+    }
+    fs::create_dir_all(destination_root)?;
+    let destination_root = destination_root.canonicalize()?;
+    let vault_root = paths
+        .notes_dir
+        .parent()
+        .ok_or_else(|| io::Error::other("Vault has no root directory"))?
+        .canonicalize()?;
+    if destination_root.starts_with(&vault_root) {
+        return Err(io::Error::other("Export destination must be outside the active vault").into());
+    }
+
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+    let destination = destination_root.join(format!("Lilo-Vault-{timestamp}"));
+    if destination.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Export already exists").into());
+    }
+    fs::create_dir(&destination)?;
+    copy_directory(&paths.notes_dir, &destination.join("Notes"))?;
+    copy_directory(&paths.trash_dir, &destination.join("Trash"))?;
+    fs::copy(&paths.settings_path, destination.join("settings.json"))?;
+    Ok(destination)
+}
+
+pub fn vault_diagnostics(paths: &StoragePaths) -> StorageResult<Vec<String>> {
+    let (_, warnings, _) = load_notes(&paths.notes_dir)?;
+    let mut diagnostics = warnings;
+    for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
+        if !directory.is_dir() {
+            diagnostics.push(format!("Missing managed directory: {}", directory.display()));
+        }
+    }
+    Ok(diagnostics)
+}
+
+fn safe_managed_file(root: &Path, relative: &Path) -> StorageResult<PathBuf> {
+    if !is_safe_relative_path(relative) || relative.as_os_str().is_empty() {
+        return Err(io::Error::other("Managed file path is unsafe").into());
+    }
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "Managed file does not exist").into());
+    }
+    Ok(path)
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> StorageResult<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 fn load_settings(path: &Path) -> StorageResult<AppSettings> {
     match fs::read_to_string(path) {
         Ok(json) => Ok(serde_json::from_str(&json)?),
@@ -757,7 +944,21 @@ fn default_vault_path(config_dir: &Path) -> PathBuf {
     UserDirs::new()
         .and_then(|dirs| dirs.document_dir().map(Path::to_path_buf))
         .unwrap_or_else(|| config_dir.join("Vault"))
-        .join("RustWidgetsVault")
+        .join("LiloVault")
+}
+
+fn copy_legacy_config(legacy: &Path, current: &Path) -> StorageResult<()> {
+    if current.join("settings.json").exists() || !legacy.is_dir() || legacy == current {
+        return Ok(());
+    }
+    for name in ["settings.json", "notes.json", "note.json", "note.txt"] {
+        let source = legacy.join(name);
+        let destination = current.join(name);
+        if source.is_file() && !destination.exists() {
+            fs::copy(source, destination)?;
+        }
+    }
+    Ok(())
 }
 
 fn load_notes(notes_dir: &Path) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {

@@ -1,11 +1,40 @@
 //! Cursor-aware Markdown layout for the live editor.
 
 use eframe::egui::{
-    Color32, FontFamily, FontId, Id, Stroke, TextEdit, TextFormat, Ui, Visuals, text::LayoutJob,
-    text_edit::TextEditOutput, text_edit::TextEditState,
+    Color32, Context, FontFamily, FontId, Id, Stroke, TextEdit, TextFormat, Ui, Visuals,
+    text::{CCursor, CCursorRange, LayoutJob},
+    text_edit::TextEditOutput,
+    text_edit::TextEditState,
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 const HIDDEN_MARKER_SIZE: f32 = 0.1;
+const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownCommand {
+    Bold,
+    Italic,
+    InlineCode,
+    CodeBlock,
+    WikiLink,
+    Heading,
+    Bullet,
+    Task,
+    Indent,
+    Outdent,
+}
+
+#[derive(Clone)]
+struct CachedLayout {
+    source_hash: u64,
+    active_line: Option<usize>,
+    visual_key: u64,
+    body_size_bits: u32,
+    job: LayoutJob,
+}
 
 /// Shows one live Markdown editor. `id` owns its cursor and undo state.
 pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> TextEditOutput {
@@ -16,19 +45,252 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
         .and_then(|state| state.cursor.char_range())
         .map(|range| line_at_character(text, range.primary.index.into()));
 
+    let cache_id = id.with("markdown_layout");
+    let cached = ui
+        .ctx()
+        .data(|data| data.get_temp::<Arc<CachedLayout>>(cache_id));
+    let mut rendered_cache = None;
     let mut layouter = |ui: &Ui, buffer: &dyn eframe::egui::TextBuffer, wrap_width: f32| {
-        let mut layout_job = highlight(buffer.as_str(), ui.visuals(), active_line, body_size);
+        let source = buffer.as_str();
+        let source_hash = text_hash(source);
+        let visual_key = visual_hash(ui.visuals());
+        let mut layout_job = cached
+            .as_ref()
+            .filter(|cached| {
+                cached.source_hash == source_hash
+                    && cached.active_line == active_line
+                    && cached.visual_key == visual_key
+                    && cached.body_size_bits == body_size.to_bits()
+            })
+            .map_or_else(
+                || highlight(source, ui.visuals(), active_line, body_size),
+                |cached| cached.job.clone(),
+            );
         layout_job.wrap.max_width = wrap_width;
+        rendered_cache = Some(Arc::new(CachedLayout {
+            source_hash,
+            active_line,
+            visual_key,
+            body_size_bits: body_size.to_bits(),
+            job: layout_job.clone(),
+        }));
         ui.fonts_mut(|fonts| fonts.layout_job(layout_job))
     };
 
-    TextEdit::multiline(text)
+    let output = TextEdit::multiline(text)
         .id(id)
         .desired_width(f32::INFINITY)
         .desired_rows(20)
         .hint_text("Enter Markdown here...")
         .layouter(&mut layouter)
-        .show(ui)
+        .show(ui);
+    if let Some(cache) = rendered_cache {
+        ui.ctx().data_mut(|data| data.insert_temp(cache_id, cache));
+    }
+    output
+}
+
+pub fn apply_command(
+    ctx: &Context,
+    id: Id,
+    text: &mut String,
+    command: MarkdownCommand,
+) -> bool {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    let range = state.cursor.char_range().unwrap_or_else(|| {
+        let end = CCursor::new(text.chars().count());
+        CCursorRange::one(end)
+    });
+    let selected = range.as_sorted_char_range();
+    let selected = usize::from(selected.start)..usize::from(selected.end);
+    let new_selection = match command {
+        MarkdownCommand::Bold => wrap_selection(text, selected, "**", "**", "bold text"),
+        MarkdownCommand::Italic => wrap_selection(text, selected, "*", "*", "italic text"),
+        MarkdownCommand::InlineCode => wrap_selection(text, selected, "`", "`", "code"),
+        MarkdownCommand::CodeBlock => {
+            wrap_selection(text, selected, "```\n", "\n```", "code")
+        }
+        MarkdownCommand::WikiLink => wrap_selection(text, selected, "[[", "]]", "Note"),
+        MarkdownCommand::Heading => edit_selected_lines(text, selected, LineEdit::Toggle("# ")),
+        MarkdownCommand::Bullet => edit_selected_lines(text, selected, LineEdit::Toggle("- ")),
+        MarkdownCommand::Task => edit_selected_lines(text, selected, LineEdit::Toggle("- [ ] ")),
+        MarkdownCommand::Indent => edit_selected_lines(text, selected, LineEdit::Indent),
+        MarkdownCommand::Outdent => edit_selected_lines(text, selected, LineEdit::Outdent),
+    };
+    state.cursor.set_char_range(Some(CCursorRange::two(
+        CCursor::new(new_selection.start),
+        CCursor::new(new_selection.end),
+    )));
+    state.store(ctx, id);
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    true
+}
+
+pub fn continue_list_at_cursor(ctx: &Context, id: Id, text: &mut String) -> bool {
+    let Some(mut state) = TextEditState::load(ctx, id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return false;
+    };
+    let Some(cursor) = range.single() else {
+        return false;
+    };
+    let cursor_index = usize::from(cursor.index);
+    let cursor_byte = char_to_byte(text, cursor_index);
+    let line_start = text[..cursor_byte].rfind('\n').map_or(0, |index| index + 1);
+    let line = &text[line_start..cursor_byte];
+    let indent_bytes = line.len() - line.trim_start().len();
+    let indent = &line[..indent_bytes];
+    let trimmed = &line[indent_bytes..];
+    let Some(marker) = continuation_marker(trimmed) else {
+        return false;
+    };
+
+    if trimmed.trim_end() == marker.trim_end() {
+        text.replace_range(line_start..cursor_byte, "\n");
+        let next = text[..line_start + 1].chars().count();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(next))));
+    } else {
+        let insertion = format!("\n{indent}{}", next_marker(&marker));
+        text.insert_str(cursor_byte, &insertion);
+        let next = cursor_index + insertion.chars().count();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(next))));
+    }
+    state.store(ctx, id);
+    true
+}
+
+#[derive(Clone, Copy)]
+enum LineEdit {
+    Toggle(&'static str),
+    Indent,
+    Outdent,
+}
+
+fn wrap_selection(
+    text: &mut String,
+    selected: std::ops::Range<usize>,
+    opening: &str,
+    closing: &str,
+    placeholder: &str,
+) -> std::ops::Range<usize> {
+    let start = char_to_byte(text, selected.start);
+    let end = char_to_byte(text, selected.end);
+    if selected.is_empty() {
+        let insertion = format!("{opening}{placeholder}{closing}");
+        text.insert_str(start, &insertion);
+        let selection_start = selected.start + opening.chars().count();
+        return selection_start..selection_start + placeholder.chars().count();
+    }
+
+    if start >= opening.len()
+        && text[..start].ends_with(opening)
+        && text[end..].starts_with(closing)
+    {
+        text.replace_range(end..end + closing.len(), "");
+        text.replace_range(start - opening.len()..start, "");
+        let opening_chars = opening.chars().count();
+        return selected.start - opening_chars..selected.end - opening_chars;
+    }
+
+    text.insert_str(end, closing);
+    text.insert_str(start, opening);
+    let opening_chars = opening.chars().count();
+    selected.start + opening_chars..selected.end + opening_chars
+}
+
+fn edit_selected_lines(
+    text: &mut String,
+    selected: std::ops::Range<usize>,
+    edit: LineEdit,
+) -> std::ops::Range<usize> {
+    let start_byte = char_to_byte(text, selected.start);
+    let end_byte = char_to_byte(text, selected.end);
+    let line_start = text[..start_byte].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = text[end_byte..]
+        .find('\n')
+        .map_or(text.len(), |index| end_byte + index + 1);
+    let replacement = text[line_start..line_end]
+        .split_inclusive('\n')
+        .map(|line| edit_line(line, edit))
+        .collect::<String>();
+    let selection_start = text[..line_start].chars().count();
+    let selection_end = selection_start + replacement.chars().count();
+    text.replace_range(line_start..line_end, &replacement);
+    selection_start..selection_end
+}
+
+fn edit_line(line: &str, edit: LineEdit) -> String {
+    let (content, newline) = line
+        .strip_suffix('\n')
+        .map_or((line, ""), |content| (content, "\n"));
+    match edit {
+        LineEdit::Indent => format!("    {content}{newline}"),
+        LineEdit::Outdent => {
+            let trimmed = content.strip_prefix('\t').unwrap_or_else(|| {
+                let spaces = content.bytes().take_while(|byte| *byte == b' ').count().min(4);
+                &content[spaces..]
+            });
+            format!("{trimmed}{newline}")
+        }
+        LineEdit::Toggle(marker) => {
+            let indent_bytes = content.len() - content.trim_start().len();
+            let (indent, body) = content.split_at(indent_bytes);
+            if let Some(without_marker) = body.strip_prefix(marker) {
+                format!("{indent}{without_marker}{newline}")
+            } else {
+                format!("{indent}{marker}{body}{newline}")
+            }
+        }
+    }
+}
+
+fn continuation_marker(line: &str) -> Option<String> {
+    for marker in ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
+        if line.starts_with(marker) {
+            return Some(marker.to_owned());
+        }
+    }
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0 && line[digits..].starts_with(". ")).then(|| line[..digits + 2].to_owned())
+}
+
+fn next_marker(marker: &str) -> String {
+    let digits = marker.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        let number = marker[..digits].parse::<usize>().unwrap_or(0) + 1;
+        format!("{number}. ")
+    } else if marker == "- [x] " || marker == "- [X] " {
+        "- [ ] ".to_owned()
+    } else {
+        marker.to_owned()
+    }
+}
+
+fn char_to_byte(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map_or(text.len(), |(index, _)| index)
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn visual_hash(visuals: &Visuals) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    visuals.text_color().to_array().hash(&mut hasher);
+    visuals.weak_text_color().to_array().hash(&mut hasher);
+    visuals.hyperlink_color.to_array().hash(&mut hasher);
+    visuals.code_bg_color.to_array().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Returns the source character under the pointer.
@@ -86,6 +348,10 @@ fn highlight(
 ) -> LayoutJob {
     let palette = Palette::new(visuals, body_size);
     let mut job = LayoutJob::default();
+    if source.len() > MAX_HIGHLIGHT_BYTES {
+        append(&mut job, source, palette.body);
+        return job;
+    }
     let mut inside_code_block = false;
 
     // Galley text must exactly match the editable source.
@@ -460,5 +726,42 @@ mod tests {
         assert!(toggle_checkbox_at_character(&mut text, 4));
         assert_eq!(text, "  - [x] task");
         assert!(!toggle_checkbox_at_character(&mut text, 10));
+    }
+
+    #[test]
+    fn formatting_wraps_unicode_selection_by_character_index() {
+        let mut text = "ёжик text".to_owned();
+
+        let selected = wrap_selection(&mut text, 0..4, "**", "**", "bold text");
+
+        assert_eq!(text, "**ёжик** text");
+        assert_eq!(selected, 2..6);
+    }
+
+    #[test]
+    fn line_actions_indent_and_toggle_tasks() {
+        let mut text = "first\nsecond\n".to_owned();
+        let selection = edit_selected_lines(&mut text, 0..12, LineEdit::Toggle("- [ ] "));
+        assert_eq!(text, "- [ ] first\n- [ ] second\n");
+
+        edit_selected_lines(&mut text, selection, LineEdit::Indent);
+        assert_eq!(text, "    - [ ] first\n    - [ ] second\n");
+    }
+
+    #[test]
+    fn numbered_lists_continue_with_the_next_number() {
+        assert_eq!(continuation_marker("9. item").as_deref(), Some("9. "));
+        assert_eq!(next_marker("9. "), "10. ");
+        assert_eq!(next_marker("- [x] "), "- [ ] ");
+    }
+
+    #[test]
+    fn very_large_notes_keep_source_text_intact() {
+        let source = "**large note**\n".repeat(40_000);
+
+        let job = highlight(&source, &Visuals::dark(), None, 15.0);
+
+        assert_eq!(job.text, source);
+        assert_eq!(job.sections.len(), 1);
     }
 }
