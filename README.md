@@ -1,4 +1,18 @@
+<div align="center">
+
 # Lilo
+
+**A compact Markdown note-taking widget with a built-in knowledge graph.**
+
+[![Version](https://img.shields.io/badge/version-0.0.1-6f42c1?style=flat-square)](https://github.com/HellterEnjoy/Lilo)
+[![Status](https://img.shields.io/badge/status-early%20MVP-f39c12?style=flat-square)](ROADMAP.md)
+[![Rust](https://img.shields.io/badge/Rust-2024-b7410e?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![egui](https://img.shields.io/badge/UI-egui-4b8bbe?style=flat-square)](https://github.com/emilk/egui)
+[![Windows](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows11&logoColor=white)](#building-from-source)
+[![Markdown](https://img.shields.io/badge/storage-Markdown-24292f?style=flat-square&logo=markdown&logoColor=white)](#storage)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-5c6ac4?style=flat-square)](LICENSE)
+
+</div>
 
 Lilo is a compact, Windows-first note-taking widget built with Rust and egui. It keeps notes as ordinary Markdown files and provides a small knowledge graph for navigating connections between them.
 
