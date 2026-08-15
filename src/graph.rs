@@ -17,6 +17,12 @@ pub enum GraphScope {
 
 pub struct GraphState {
     pub scope: GraphScope,
+    pub filter: String,
+    pub tag_filter: String,
+    pub show_external: bool,
+    pub show_missing: bool,
+    pub show_labels: bool,
+    pub max_nodes: usize,
     pan: Vec2,
     zoom: f32,
     node_offsets: HashMap<(GraphScope, Uuid), Vec2>,
@@ -62,6 +68,12 @@ impl Default for GraphState {
     fn default() -> Self {
         Self {
             scope: GraphScope::Local,
+            filter: String::new(),
+            tag_filter: String::new(),
+            show_external: true,
+            show_missing: true,
+            show_labels: true,
+            max_nodes: 80,
             pan: Vec2::ZERO,
             zoom: 1.0,
             node_offsets: HashMap::new(),
@@ -136,26 +148,34 @@ pub fn show(
         ui.colored_label(Color32::from_gray(80), "● external");
         ui.colored_label(Color32::from_gray(125), "◌ missing");
     });
+    ui.collapsing("Filters and density", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter)
+                    .hint_text("Find title or alias")
+                    .desired_width(150.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut state.tag_filter)
+                    .hint_text("Tag filter")
+                    .desired_width(110.0),
+            );
+            ui.checkbox(&mut state.show_external, "External");
+            ui.checkbox(&mut state.show_missing, "Missing");
+            ui.checkbox(&mut state.show_labels, "Labels");
+            ui.add(egui::Slider::new(&mut state.max_nodes, 10..=200).text("Node limit"));
+        });
+    });
 
     let selection = select_graph(
-        state.scope,
+        state,
         notes,
         links,
         selected_note_id,
         notes_root,
         selected_folder,
     );
-    let title_by_id: HashMap<Uuid, &str> = notes
-        .iter()
-        .map(|note| {
-            let title = if note.title.trim().is_empty() {
-                "Untitled"
-            } else {
-                note.title.as_str()
-            };
-            (note.id, title)
-        })
-        .collect();
+    let note_by_id: HashMap<Uuid, &Note> = notes.iter().map(|note| (note.id, note)).collect();
 
     let canvas_size = ui.available_size().max(Vec2::new(80.0, 80.0));
     let (response, painter) = ui.allocate_painter(canvas_size, Sense::click_and_drag());
@@ -316,12 +336,14 @@ pub fn show(
         }
 
         if (selected || hovered || dragging || degree.get(id).copied().unwrap_or(0) >= 4)
-            && let Some(title) = title_by_id.get(id)
+            && state.show_labels
+            && let Some(note) = note_by_id.get(id)
         {
+            let title = display_title(note);
             painter.text(
                 position + Vec2::new(0.0, radius + 7.0),
                 egui::Align2::CENTER_TOP,
-                *title,
+                title,
                 FontId::proportional(12.0),
                 ui.visuals().text_color(),
             );
@@ -335,8 +357,15 @@ pub fn show(
             } else {
                 egui::CursorIcon::Grab
             });
-        if let Some(title) = title_by_id.get(&id) {
-            response.clone().on_hover_text(*title);
+        if let Some(note) = note_by_id.get(&id) {
+            let mut details = display_title(note).to_owned();
+            if !note.tags.is_empty() {
+                details.push_str(&format!("\nTags: {}", note.tags.join(", ")));
+            }
+            if !note.aliases.is_empty() {
+                details.push_str(&format!("\nAliases: {}", note.aliases.join(", ")));
+            }
+            response.clone().on_hover_text(details);
         }
         if response.double_clicked() {
             return GraphOutput {
@@ -356,6 +385,7 @@ pub fn show(
     }
 
     if state.scope == GraphScope::Local
+        && state.show_missing
         && let Some(selected) = selected_note_id
         && let Some(note_links) = links.links_for(selected)
         && let Some(center) = screen_positions.get(&selected).copied()
@@ -454,8 +484,16 @@ fn hovered_node(
         .map(|(id, _)| id)
 }
 
+fn display_title(note: &Note) -> &str {
+    if note.title.trim().is_empty() {
+        "Untitled"
+    } else {
+        note.title.as_str()
+    }
+}
+
 fn select_graph(
-    scope: GraphScope,
+    state: &GraphState,
     notes: &[Note],
     links: &LinkIndex,
     selected_note_id: Option<Uuid>,
@@ -470,11 +508,11 @@ fn select_graph(
     let mut visible_ids = HashSet::new();
     let mut external_ids = HashSet::new();
 
-    match scope {
+    match state.scope {
         GraphScope::Global => {
             let mut newest = notes.iter().collect::<Vec<_>>();
             newest.sort_by_key(|note| std::cmp::Reverse(note.updated_at));
-            visible_ids.extend(newest.into_iter().take(80).map(|note| note.id));
+            visible_ids.extend(newest.into_iter().take(state.max_nodes).map(|note| note.id));
         }
         GraphScope::Local => {
             if let Some(selected) = selected_note_id
@@ -504,6 +542,58 @@ fn select_graph(
             }
             external_ids.extend(visible_ids.difference(&folder_ids).copied());
         }
+    }
+
+    if !state.show_external {
+        visible_ids.retain(|id| !external_ids.contains(id));
+        external_ids.clear();
+    }
+
+    let query = state.filter.trim().to_lowercase();
+    let tag_query = state
+        .tag_filter
+        .trim()
+        .trim_start_matches('#')
+        .to_lowercase();
+    if !query.is_empty() || !tag_query.is_empty() {
+        let matching = notes
+            .iter()
+            .filter(|note| {
+                let matches_query = query.is_empty()
+                    || note.title.to_lowercase().contains(&query)
+                    || note
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_lowercase().contains(&query));
+                let matches_tag = tag_query.is_empty()
+                    || note
+                        .tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&tag_query));
+                matches_query && matches_tag
+            })
+            .map(|note| note.id)
+            .collect::<HashSet<_>>();
+        visible_ids.retain(|id| matching.contains(id) || Some(*id) == selected_note_id);
+        external_ids.retain(|id| visible_ids.contains(id));
+    }
+
+    if visible_ids.len() > state.max_nodes {
+        let mut newest = notes
+            .iter()
+            .filter(|note| visible_ids.contains(&note.id))
+            .collect::<Vec<_>>();
+        newest.sort_by_key(|note| std::cmp::Reverse(note.updated_at));
+        let mut kept = newest
+            .into_iter()
+            .take(state.max_nodes)
+            .map(|note| note.id)
+            .collect::<HashSet<_>>();
+        if let Some(selected) = selected_note_id {
+            kept.insert(selected);
+        }
+        visible_ids.retain(|id| kept.contains(id));
+        external_ids.retain(|id| visible_ids.contains(id));
     }
 
     let mut node_ids: Vec<Uuid> = visible_ids.iter().copied().collect();
@@ -572,11 +662,17 @@ fn layout_positions(selection: &GraphSelection) -> HashMap<Uuid, Pos2> {
             positions.insert(center, Pos2::ZERO);
             continue;
         }
-        let radius = 95.0 * depth as f32;
-        let count = ids.len() as f32;
-        for (index, id) in ids.into_iter().enumerate() {
-            let angle = index as f32 / count * TAU + depth as f32 * 0.37;
-            positions.insert(id, Pos2::new(angle.cos() * radius, angle.sin() * radius));
+        let base_radius = 95.0 * depth as f32;
+        for id in ids {
+            let bytes = id.as_bytes();
+            let angle_seed = u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0; 8]));
+            let radius_seed = u16::from_be_bytes([bytes[8], bytes[9]]);
+            let angle = angle_seed as f64 / u64::MAX as f64 * TAU as f64;
+            let radius = base_radius * (0.92 + radius_seed as f32 / u16::MAX as f32 * 0.16);
+            positions.insert(
+                id,
+                Pos2::new(angle.cos() as f32 * radius, angle.sin() as f32 * radius),
+            );
         }
     }
     positions
@@ -631,9 +727,10 @@ mod tests {
         let second_id = second.id;
         let notes = vec![first, second, third];
         let links = LinkIndex::build(&notes, &root);
+        let state = GraphState::default();
 
         let selection = select_graph(
-            GraphScope::Local,
+            &state,
             &notes,
             &links,
             Some(first_id),
@@ -654,9 +751,13 @@ mod tests {
         let bones_id = bones.id;
         let notes = vec![programming, bones];
         let links = LinkIndex::build(&notes, &root);
+        let state = GraphState {
+            scope: GraphScope::Folder,
+            ..Default::default()
+        };
 
         let selection = select_graph(
-            GraphScope::Folder,
+            &state,
             &notes,
             &links,
             None,
@@ -694,15 +795,12 @@ mod tests {
             .map(|index| note(&root, "", &format!("Note {index}"), ""))
             .collect::<Vec<_>>();
         let links = LinkIndex::build(&notes, &root);
+        let state = GraphState {
+            scope: GraphScope::Global,
+            ..Default::default()
+        };
 
-        let selection = select_graph(
-            GraphScope::Global,
-            &notes,
-            &links,
-            None,
-            &root,
-            Path::new(""),
-        );
+        let selection = select_graph(&state, &notes, &links, None, &root, Path::new(""));
 
         assert_eq!(selection.node_ids.len(), 80);
     }
@@ -723,5 +821,112 @@ mod tests {
         assert_eq!(offsets[0].note_id, id);
         assert_eq!(offsets[0].scope, "folder");
         assert_eq!((offsets[0].x, offsets[0].y), (12.0, -8.0));
+    }
+
+    #[test]
+    fn graph_filters_titles_aliases_and_tags_but_keeps_the_current_note() {
+        let root = PathBuf::from("vault/Notes");
+        let current = note(&root, "", "Current", "[[Rust ownership]] [[Python]]");
+        let current_id = current.id;
+        let mut rust = note(&root, "", "Ownership", "");
+        rust.aliases.push("Rust ownership".to_owned());
+        rust.tags.push("rust".to_owned());
+        let rust_id = rust.id;
+        let mut python = note(&root, "", "Python", "");
+        python.tags.push("python".to_owned());
+        let notes = vec![current, rust, python];
+        let links = LinkIndex::build(&notes, &root);
+        let state = GraphState {
+            filter: "ownership".to_owned(),
+            tag_filter: "#rust".to_owned(),
+            ..Default::default()
+        };
+
+        let selection = select_graph(
+            &state,
+            &notes,
+            &links,
+            Some(current_id),
+            &root,
+            Path::new(""),
+        );
+
+        assert_eq!(selection.node_ids.len(), 2);
+        assert!(selection.node_ids.contains(&current_id));
+        assert!(selection.node_ids.contains(&rust_id));
+    }
+
+    #[test]
+    fn folder_graph_can_hide_cross_folder_nodes() {
+        let root = PathBuf::from("vault/Notes");
+        let inside = note(&root, "Inside", "One", "[[Outside/Two]]");
+        let inside_id = inside.id;
+        let outside = note(&root, "Outside", "Two", "");
+        let notes = vec![inside, outside];
+        let links = LinkIndex::build(&notes, &root);
+        let state = GraphState {
+            scope: GraphScope::Folder,
+            show_external: false,
+            ..Default::default()
+        };
+
+        let selection = select_graph(&state, &notes, &links, None, &root, Path::new("Inside"));
+
+        assert_eq!(selection.node_ids, vec![inside_id]);
+        assert!(selection.external_ids.is_empty());
+        assert!(selection.edges.is_empty());
+    }
+
+    #[test]
+    fn an_unrelated_node_does_not_move_existing_layout_positions() {
+        let center = Uuid::from_u128(1);
+        let linked = Uuid::from_u128(2);
+        let initial = GraphSelection {
+            node_ids: vec![center, linked],
+            edges: vec![(center, linked)],
+            external_ids: HashSet::new(),
+            center_id: Some(center),
+        };
+        let initial_positions = layout_positions(&initial);
+        let unrelated = Uuid::from_u128(3);
+        let expanded = GraphSelection {
+            node_ids: vec![center, linked, unrelated],
+            edges: vec![(center, linked)],
+            external_ids: HashSet::new(),
+            center_id: Some(center),
+        };
+        let expanded_positions = layout_positions(&expanded);
+
+        assert_eq!(initial_positions[&center], expanded_positions[&center]);
+        assert_eq!(initial_positions[&linked], expanded_positions[&linked]);
+    }
+
+    #[test]
+    fn dense_global_graph_respects_limit_with_a_large_vault() {
+        let root = PathBuf::from("vault/Notes");
+        let notes = (0..1_000)
+            .map(|index| {
+                note(
+                    &root,
+                    &format!("Area {}", index % 20),
+                    &format!("Note {index}"),
+                    &format!("[[Note {}]]", (index + 1) % 1_000),
+                )
+            })
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let links = LinkIndex::build(&notes, &root);
+        let state = GraphState {
+            scope: GraphScope::Global,
+            max_nodes: 120,
+            ..Default::default()
+        };
+        let selection = select_graph(&state, &notes, &links, None, &root, Path::new(""));
+        let positions = layout_positions(&selection);
+        let elapsed = started.elapsed();
+
+        assert_eq!(selection.node_ids.len(), 120);
+        assert_eq!(positions.len(), 120);
+        assert!(elapsed < std::time::Duration::from_secs(10));
     }
 }

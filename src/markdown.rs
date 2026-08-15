@@ -13,6 +13,7 @@ use std::sync::Arc;
 const HIDDEN_MARKER_SIZE: f32 = 0.1;
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownCommand {
     Bold,
@@ -79,6 +80,7 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
 
     let output = TextEdit::multiline(text)
         .id(id)
+        .frame(eframe::egui::Frame::NONE)
         .desired_width(f32::INFINITY)
         .desired_rows(20)
         .hint_text("Enter Markdown here...")
@@ -90,12 +92,7 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
     output
 }
 
-pub fn apply_command(
-    ctx: &Context,
-    id: Id,
-    text: &mut String,
-    command: MarkdownCommand,
-) -> bool {
+pub fn apply_command(ctx: &Context, id: Id, text: &mut String, command: MarkdownCommand) -> bool {
     let mut state = TextEditState::load(ctx, id).unwrap_or_default();
     let range = state.cursor.char_range().unwrap_or_else(|| {
         let end = CCursor::new(text.chars().count());
@@ -107,9 +104,7 @@ pub fn apply_command(
         MarkdownCommand::Bold => wrap_selection(text, selected, "**", "**", "bold text"),
         MarkdownCommand::Italic => wrap_selection(text, selected, "*", "*", "italic text"),
         MarkdownCommand::InlineCode => wrap_selection(text, selected, "`", "`", "code"),
-        MarkdownCommand::CodeBlock => {
-            wrap_selection(text, selected, "```\n", "\n```", "code")
-        }
+        MarkdownCommand::CodeBlock => wrap_selection(text, selected, "```\n", "\n```", "code"),
         MarkdownCommand::WikiLink => wrap_selection(text, selected, "[[", "]]", "Note"),
         MarkdownCommand::Heading => edit_selected_lines(text, selected, LineEdit::Toggle("# ")),
         MarkdownCommand::Bullet => edit_selected_lines(text, selected, LineEdit::Toggle("- ")),
@@ -233,7 +228,11 @@ fn edit_line(line: &str, edit: LineEdit) -> String {
         LineEdit::Indent => format!("    {content}{newline}"),
         LineEdit::Outdent => {
             let trimmed = content.strip_prefix('\t').unwrap_or_else(|| {
-                let spaces = content.bytes().take_while(|byte| *byte == b' ').count().min(4);
+                let spaces = content
+                    .bytes()
+                    .take_while(|byte| *byte == b' ')
+                    .count()
+                    .min(4);
                 &content[spaces..]
             });
             format!("{trimmed}{newline}")

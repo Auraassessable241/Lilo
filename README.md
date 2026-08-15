@@ -4,8 +4,8 @@
 
 **A compact Markdown note-taking widget with a built-in knowledge graph.**
 
-[![Version](https://img.shields.io/badge/version-0.0.1-6f42c1?style=flat-square)](https://github.com/HellterEnjoy/Lilo)
-[![Status](https://img.shields.io/badge/status-early%20MVP-f39c12?style=flat-square)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-0.1.0-6f42c1?style=flat-square)](https://github.com/HellterEnjoy/Lilo/releases)
+[![Status](https://img.shields.io/badge/status-stable%20MVP-2ea44f?style=flat-square)](ROADMAP.md)
 [![Rust](https://img.shields.io/badge/Rust-2024-b7410e?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![egui](https://img.shields.io/badge/UI-egui-4b8bbe?style=flat-square)](https://github.com/emilk/egui)
 [![Windows](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows11&logoColor=white)](#building-from-source)
@@ -16,7 +16,7 @@
 
 Lilo is a compact, Windows-first note-taking widget built with Rust and egui. It keeps notes as ordinary Markdown files and provides a small knowledge graph for navigating connections between them.
 
-> **MVP status:** version `0.0.1` is an early, functional build. Core note-taking and storage features work, but the interface is intentionally minimal and still needs substantial UI/UX refinement.
+> **Stable MVP:** version `0.1.0` completes the first coherent editor, knowledge-navigation and recovery workflow. It is still a small preview application rather than a finished commercial product.
 
 Lilo is non-commercial source-available software.
 
@@ -28,12 +28,17 @@ Lilo is non-commercial source-available software.
 - Obsidian-style `[[wiki links]]`, aliases and backlinks;
 - nested vault folders;
 - note search, sorting and pinning;
+- adaptive icon navigation with top, side and floating toolbar layouts;
+- keyboard-only view switching, list navigation and editor formatting;
 - safe deletion to Trash with restoration;
 - automatic creation and modification dates;
 - local, folder and global graph scopes;
 - graph zooming, panning and movable nodes;
+- stable graph placement, filters, tag/alias context and node-density controls;
 - a temporary graph overlay for switching notes without leaving the editor;
-- automatic saving, rotating backups and external file-change detection;
+- automatic saving, a visual rotating-backup browser and external conflict review;
+- Markdown import, full-vault export and immediate vault switching;
+- recovery diagnostics for malformed Markdown metadata;
 - configurable theme, accent colour, editor font size, shortcuts, always-on-top mode and Windows autostart.
 
 ## Storage
@@ -49,7 +54,13 @@ Vault/
 └── Backups/     Rotating note backups
 ```
 
-The vault location can be changed in Settings. Changing it takes effect after restarting Lilo. Because notes are regular Markdown files, they can also be inspected or edited with another text editor; Lilo detects external changes and avoids silently overwriting conflicting local edits.
+The vault location can be changed immediately in Settings. Because notes are regular Markdown files, they can also be inspected or edited with another text editor; Lilo detects external changes and avoids silently overwriting conflicting local edits.
+
+## Installing on Windows
+
+Download the `Lilo-0.1.0-windows-x64.zip` archive from [GitHub Releases](https://github.com/HellterEnjoy/Lilo/releases), verify its SHA-256 file if desired, extract the archive and run `Lilo.exe`. The preview binary is not code-signed, so Windows SmartScreen may display a warning.
+
+Updates do not require changing the vault: close Lilo and replace the extracted application files. See [RELEASE.md](RELEASE.md) for installation, updating, export and recovery instructions.
 
 ## Default shortcuts
 
@@ -66,7 +77,7 @@ Shortcuts can be changed in Settings.
 
 ## Building from source
 
-Lilo `0.0.1` does not yet provide a polished installer or signed binary. To build it locally, install the stable Rust toolchain and run:
+To build Lilo locally, install the stable Rust toolchain and run:
 
 ```powershell
 git clone https://github.com/HellterEnjoy/Lilo.git
@@ -82,15 +93,22 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-## MVP limitations
+On Windows, create the distributable ZIP and SHA-256 checksum with:
 
-- the visual design is temporary and several controls use text labels instead of final icons;
-- some workflows require more clicks than intended for later versions;
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+```
+
+## Stable MVP limitations
+
 - Windows is the current primary platform;
-- there is no finished installer, automatic updater or signed release package;
-- the global graph intentionally displays only the 80 most recently updated notes to keep the compact widget responsive.
+- there is no installer, automatic updater or signed binary yet;
+- graph density is capped by a configurable node limit to keep the compact widget responsive;
+- very large notes deliberately fall back to lightweight plain-text layout instead of expensive live highlighting.
 
 See [ROADMAP.md](ROADMAP.md) for the planned direction. The roadmap describes intent rather than fixed deadlines or guaranteed release scope.
+
+The implemented release history is recorded in [CHANGELOG.md](CHANGELOG.md), and the current performance guardrails are described in [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Contributions
 

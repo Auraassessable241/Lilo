@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSort {
@@ -27,6 +27,16 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     System,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolbarPlacement {
+    #[default]
+    Auto,
+    Top,
+    Left,
+    Right,
+    Floating,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -224,6 +234,10 @@ pub struct AppSettings {
     pub graph_node_offsets: Vec<GraphNodeOffset>,
     pub backups_enabled: bool,
     pub backup_limit: usize,
+    pub toolbar_placement: ToolbarPlacement,
+    pub toolbar_expanded: bool,
+    pub floating_toolbar_vertical: bool,
+    pub floating_toolbar_position: [f32; 2],
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -253,6 +267,10 @@ impl Default for AppSettings {
             graph_node_offsets: Vec::new(),
             backups_enabled: true,
             backup_limit: 20,
+            toolbar_placement: ToolbarPlacement::Auto,
+            toolbar_expanded: false,
+            floating_toolbar_vertical: false,
+            floating_toolbar_position: [24.0, 72.0],
         }
     }
 }
@@ -844,7 +862,10 @@ pub fn vault_diagnostics(paths: &StoragePaths) -> StorageResult<Vec<String>> {
     let mut diagnostics = warnings;
     for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
         if !directory.is_dir() {
-            diagnostics.push(format!("Missing managed directory: {}", directory.display()));
+            diagnostics.push(format!(
+                "Missing managed directory: {}",
+                directory.display()
+            ));
         }
     }
     Ok(diagnostics)
@@ -1298,6 +1319,20 @@ struct LegacyAppData {
 mod tests {
     use super::*;
 
+    fn test_paths(root: &Path) -> StoragePaths {
+        let paths = StoragePaths {
+            settings_path: root.join("settings.json"),
+            notes_dir: root.join("Notes"),
+            trash_dir: root.join("Trash"),
+            backups_dir: root.join("Backups"),
+        };
+        for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
+            fs::create_dir_all(directory).expect("create managed directory");
+        }
+        fs::write(&paths.settings_path, "{}").expect("create settings file");
+        paths
+    }
+
     #[test]
     fn markdown_note_round_trips() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -1548,6 +1583,81 @@ mod tests {
     }
 
     #[test]
+    fn backup_browser_previews_and_restores_an_older_version() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let paths = test_paths(temp.path());
+        let mut note = Note::new_named(&paths.notes_dir, "History");
+        note.content = "first version".to_owned();
+        save_note(&note).expect("save first version");
+        note.content = "second version".to_owned();
+        save_note_with_backup(&note, &paths.backups_dir, 5).expect("create backup");
+
+        let entry = list_backups(&paths)
+            .expect("list backups")
+            .pop()
+            .expect("backup entry");
+        assert_eq!(entry.note_id, note.id);
+        assert_eq!(
+            backup_preview(&paths, &entry.relative_path).unwrap(),
+            "first version"
+        );
+
+        restore_backup(&mut note, &paths, &entry.relative_path, 5).expect("restore backup");
+        assert_eq!(note.content, "first version");
+        assert_eq!(load_note(&note.file_path).unwrap().content, "first version");
+    }
+
+    #[test]
+    fn plain_markdown_import_gets_managed_metadata_without_changing_source() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let paths = test_paths(&temp.path().join("vault"));
+        let source = temp.path().join("Useful idea.md");
+        fs::write(&source, "# Useful idea\n\nPlain Markdown.").expect("write import source");
+
+        let imported = import_markdown(&source, &paths, Path::new("Inbox")).expect("import note");
+
+        assert_eq!(imported.title, "Useful idea");
+        assert_eq!(imported.content, "# Useful idea\n\nPlain Markdown.");
+        assert!(
+            imported
+                .file_path
+                .starts_with(paths.notes_dir.join("Inbox"))
+        );
+        assert!(
+            fs::read_to_string(&source)
+                .unwrap()
+                .starts_with("# Useful idea")
+        );
+        assert!(
+            fs::read_to_string(&imported.file_path)
+                .unwrap()
+                .starts_with("---\n")
+        );
+    }
+
+    #[test]
+    fn vault_export_copies_notes_trash_and_settings_outside_the_vault() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let paths = test_paths(&temp.path().join("vault"));
+        let export_root = temp.path().join("exports");
+        let note = Note::new_named(&paths.notes_dir, "Exported");
+        save_note(&note).expect("save note");
+        fs::write(paths.trash_dir.join("recoverable.md"), "recoverable").unwrap();
+
+        let exported = export_vault(&paths, &export_root).expect("export vault");
+
+        assert!(
+            exported
+                .join("Notes")
+                .join(note.file_path.file_name().unwrap())
+                .exists()
+        );
+        assert!(exported.join("Trash/recoverable.md").exists());
+        assert!(exported.join("settings.json").exists());
+        assert!(export_vault(&paths, &paths.notes_dir).is_err());
+    }
+
+    #[test]
     fn older_settings_receive_new_defaults() {
         let json = r#"{
             "version": 2,
@@ -1564,6 +1674,8 @@ mod tests {
         assert_eq!(settings.theme, ThemeChoice::Dark);
         assert!(settings.backups_enabled);
         assert_eq!(settings.shortcuts.graph_overlay, "Ctrl+Shift+G");
+        assert_eq!(settings.toolbar_placement, ToolbarPlacement::Auto);
+        assert_eq!(settings.floating_toolbar_position, [24.0, 72.0]);
     }
 
     #[test]
@@ -1576,5 +1688,42 @@ mod tests {
         let after = vault_snapshot(&notes_dir).expect("updated snapshot");
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn large_nested_vault_loads_completely_with_bounded_diagnostics() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let paths = test_paths(temp.path());
+        for folder_index in 0..12 {
+            let folder = ensure_note_folder(
+                &paths.notes_dir,
+                Path::new(&format!("Area {folder_index}/Topic")),
+            )
+            .expect("create nested folder");
+            for note_index in 0..25 {
+                let mut note =
+                    Note::new_named(&folder, &format!("Note {folder_index}-{note_index}"));
+                note.content = format!(
+                    "# Test\n\n[[Note {}-{}]] #performance",
+                    folder_index,
+                    (note_index + 1) % 25
+                );
+                save_note(&note).expect("save generated note");
+            }
+        }
+        fs::write(
+            paths.notes_dir.join("Area 0/Topic/broken.md"),
+            "---\ninvalid: [yaml\n---\n\nBody survives",
+        )
+        .expect("write malformed note");
+
+        let started = std::time::Instant::now();
+        let (notes, warnings, folders) = load_notes(&paths.notes_dir).expect("load large vault");
+        let elapsed = started.elapsed();
+
+        assert_eq!(notes.len(), 301);
+        assert_eq!(warnings.len(), 1);
+        assert!(folders.len() >= 24);
+        assert!(elapsed < std::time::Duration::from_secs(10));
     }
 }

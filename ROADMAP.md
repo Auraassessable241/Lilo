@@ -2,7 +2,7 @@
 
 Lilo is being developed as a fast, compact and keyboard-friendly note-taking widget. The roadmap is intentionally flexible: version contents may change as the application is tested in everyday use.
 
-## 0.0.1 — Functional MVP
+## 0.0.1 — Functional MVP ✅
 
 The first published version establishes the technical foundation:
 
@@ -17,7 +17,7 @@ The first published version establishes the technical foundation:
 
 The MVP prioritises working behaviour over visual polish.
 
-## 0.0.2 — Interface foundation
+## 0.0.2 — Interface foundation ✅
 
 - replace temporary letter and text controls with a consistent icon system;
 - redesign the title bar, note list and folder actions;
@@ -26,7 +26,7 @@ The MVP prioritises working behaviour over visual polish.
 - refine keyboard focus and navigation;
 - establish reusable spacing, typography and colour rules.
 
-## 0.0.3 — Editor workflow
+## 0.0.3 — Editor workflow ✅
 
 - improve Markdown editing around selections and paired markers;
 - add convenient formatting actions without introducing a separate preview mode;
@@ -35,7 +35,7 @@ The MVP prioritises working behaviour over visual polish.
 - make backlinks and unresolved links easier to inspect;
 - profile and optimise very large notes.
 
-## 0.0.4 — Knowledge navigation
+## 0.0.4 — Knowledge navigation ✅
 
 - improve graph layout quality and stability;
 - add graph filtering and clearer node states;
@@ -43,7 +43,7 @@ The MVP prioritises working behaviour over visual polish.
 - provide better controls for dense local and folder graphs;
 - explore tags and aliases as optional graph dimensions.
 
-## 0.0.5 — Vault reliability
+## 0.0.5 — Vault reliability ✅
 
 - add a visual backup browser;
 - improve conflict review for externally edited files;
@@ -51,13 +51,15 @@ The MVP prioritises working behaviour over visual polish.
 - add recovery diagnostics for malformed Markdown metadata;
 - expand automated tests for large and unusual vault structures.
 
-## 0.1.0 — Usable preview
+## 0.1.0 — Stable MVP ✅
 
 - complete the first coherent UI/UX pass;
 - improve accessibility and keyboard-only use;
 - measure startup, editor and graph performance on larger vaults;
 - prepare a repeatable Windows packaging process;
 - document installation, updates and data recovery.
+
+All planned work through `0.1.0` is implemented. See [CHANGELOG.md](CHANGELOG.md) for the release summary and [RELEASE.md](RELEASE.md) for installation and recovery guidance.
 
 ## Later possibilities
 
