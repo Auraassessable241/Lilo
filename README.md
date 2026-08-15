@@ -58,7 +58,14 @@ The vault location can be changed immediately in Settings. Because notes are reg
 
 ## Installing on Windows
 
-Download the `Lilo-0.1.0-windows-x64.zip` archive from [GitHub Releases](https://github.com/HellterEnjoy/Lilo/releases), verify its SHA-256 file if desired, extract the archive and run `Lilo.exe`. The preview binary is not code-signed, so Windows SmartScreen may display a warning.
+After the package has been accepted into the WinGet community repository, install or update Lilo with:
+
+```powershell
+winget install --id HellterEnjoy.Lilo --exact
+winget upgrade --id HellterEnjoy.Lilo --exact
+```
+
+Alternatively, download `Lilo-0.1.0-windows-x64-setup.exe` from [GitHub Releases](https://github.com/HellterEnjoy/Lilo/releases). The installer does not require administrator access and creates a Start menu shortcut. A ZIP archive remains available for portable use. The preview binary is not code-signed, so Windows SmartScreen may display a warning.
 
 Updates do not require changing the vault: close Lilo and replace the extracted application files. See [RELEASE.md](RELEASE.md) for installation, updating, export and recovery instructions.
 
@@ -93,7 +100,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-On Windows, create the distributable ZIP and SHA-256 checksum with:
+On Windows, install [Inno Setup 6](https://jrsoftware.org/isinfo.php), then create the installer, portable ZIP, and SHA-256 checksums with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
